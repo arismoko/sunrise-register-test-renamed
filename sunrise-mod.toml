@@ -1,0 +1,8 @@
+id = "sunrise_register_test"
+name = "Sunrise Register Test"
+version = "0.1.0"
+description = "A throwaway mod that tests registering a repository on the Sunrise registry."
+authors = ["arismoko"]
+license = "MIT"
+# A content mod: blocks, items and mob effects from data/ and assets/, no code.
+side = "both"

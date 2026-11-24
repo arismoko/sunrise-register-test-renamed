@@ -1,0 +1,11 @@
+{
+  "type": "minecraft:block",
+  "pools": [
+    {
+      "condition": { "type": "minecraft:survives_explosion" },
+      "entries": [{ "type": "minecraft:item", "name": "sunrise_register_test:glowing_amethyst" }],
+      "rolls": 1
+    }
+  ],
+  "random_sequence": "sunrise_register_test:blocks/glowing_amethyst"
+}

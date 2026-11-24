@@ -1,0 +1,10 @@
+summary = "A throwaway mod that tests registering a repository on the Sunrise registry."
+description = """
+This is a test project, not a mod to play with. It exists to walk the Sunrise mod registry's registration and release path from start to finish, exactly as the instructions describe it.
+
+It contains the starter block from `cargo sunrise-mod new`, Glowing Amethyst, unchanged. The project is paused once the test is over.
+"""
+
+[[screenshots]]
+path = "page/placeholder.png"
+caption = "A placeholder image; this test project has no in-game screenshot"
