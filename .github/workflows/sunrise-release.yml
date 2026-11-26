@@ -1,15 +1,142 @@
-# Written by `cargo sunrise-mod release`, which rewrites it: edits here are replaced.
+# FIXTURE ONLY. Hand-edited for the signed release path proof; this repository is a test project.
+# Runs for the single tag v0.1.3. The shared workflow is called at a branch ref, not at release-v1.
 name: Sunrise release
 on:
   push:
-    tags: ['v*']
+    tags: ['v0.1.3']
 permissions: {}
+env:
+  SHARED_WORKFLOW_IDENTITY: https://github.com/sunrise-org/sunrise-mods/.github/workflows/release.yml@refs/heads/registry-repository-only
 jobs:
+  # Precreate the empty draft so the public notes are set when the shared workflow publishes it.
+  # The shared publish job accepts an existing empty draft and keeps its notes. No checkout, no tool, no author code.
+  notes:
+    name: Precreate the TEST ONLY draft
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create the empty draft unless any release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            printf 'Release %s already exists; not touching it.\n' "$TAG" >&2
+            exit 1
+          fi
+          notes="$RUNNER_TEMP/notes.md"
+          {
+            printf '**TEST ONLY. Not a mod to play or install.**\n\n'
+            printf 'This release exists to prove the Sunrise registry'"'"'s signed release path. '
+            printf 'It was built by a test copy of the shared release workflow and its signer is not production trust. '
+            printf 'The project stays paused in the registry, so nothing here is published to players.\n\n'
+            printf 'Tag: `%s`\nCommit: `%s`\nShared workflow: `%s`\n' "$TAG" "$COMMIT" "$SHARED_WORKFLOW_IDENTITY"
+          } > "$notes"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "$TAG" --notes-file "$notes"
+
   release:
+    needs: notes
     permissions:
       contents: write
       id-token: write
       attestations: write
-    uses: sunrise-org/sunrise-mods/.github/workflows/release.yml@release-v1
+    uses: sunrise-org/sunrise-mods/.github/workflows/release.yml@registry-repository-only
     with:
       path: .
+
+  # Read-only: downloads the release assets and runs `gh attestation verify`. Nothing from the release is executed.
+  verify:
+    name: Verify the attestations
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+      EXPECTED_BUILD_SIGNER_DIGEST: '0d34c6f83df3b795e5c945ad6dac45b6f2548130'
+    steps:
+      - name: Download the five assets and verify them
+        run: |
+          set -euo pipefail
+          gh --version
+          id=sunrise_register_test
+          version=${TAG#v}
+          stem="$id-$version"
+          smod="$stem.smod"
+          page="$stem.page.tar"
+          meta="$stem.release.json"
+          dir="$RUNNER_TEMP/assets"
+          out="$RUNNER_TEMP/verified"
+          mkdir "$dir" "$out"
+
+          # Exactly the five agreed assets, on a published release whose notes say TEST ONLY.
+          want=$(printf '%s\n' "$smod" "$page" "$meta" "$smod.sigstore.json" "$page.sigstore.json" | sort)
+          have=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | sort)
+          [[ "$have" == "$want" ]] || { printf 'unexpected assets:\n%s\n' "$have" >&2; exit 1; }
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,body \
+            --jq 'select(.isDraft == false and (.body | contains("TEST ONLY")))' | grep -q .
+          for name in $want; do
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$dir" --pattern "$name"
+          done
+          [[ $(ls "$dir" | wc -l) -eq 5 ]]
+
+          verify() {
+            gh attestation verify "$dir/$1" --bundle "$dir/$1.sigstore.json" \
+              --repo "$GITHUB_REPOSITORY" \
+              --predicate-type https://slsa.dev/provenance/v1 \
+              --cert-oidc-issuer https://token.actions.githubusercontent.com \
+              --cert-identity "$SHARED_WORKFLOW_IDENTITY" \
+              --source-ref "$GITHUB_REF" --source-digest "$GITHUB_SHA" \
+              --format json > "$out/$1.json"
+          }
+          verify "$smod"
+          verify "$page"
+
+          # Everything below reads only the successfully verified output, never the bundle itself.
+          for name in "$smod" "$page"; do
+            jq -e --arg signer "$SHARED_WORKFLOW_IDENTITY" --arg sha "$GITHUB_SHA" --arg ref "$GITHUB_REF" \
+              --arg rid "$GITHUB_REPOSITORY_ID" '
+              length == 1 and (.[0].verificationResult.signature.certificate
+                | .buildSignerURI == $signer and .sourceRepositoryDigest == $sha
+                  and .sourceRepositoryRef == $ref and .sourceRepositoryIdentifier == $rid)' \
+              "$out/$name.json" > /dev/null
+          done
+
+          sum() { sha256sum "$dir/$1" | cut -d' ' -f1; }
+          subjects() { jq -c '[.[0].verificationResult.statement.subject[] | {name, digest}] | sort_by(.name)' "$out/$1.json"; }
+          smod_want=$(jq -nc --arg a "$smod" --arg ah "$(sum "$smod")" --arg b "$meta" --arg bh "$(sum "$meta")" \
+            '[{name: $a, digest: {sha256: $ah}}, {name: $b, digest: {sha256: $bh}}] | sort_by(.name)')
+          page_want=$(jq -nc --arg a "$page" --arg ah "$(sum "$page")" '[{name: $a, digest: {sha256: $ah}}]')
+          [[ $(subjects "$smod") == "$smod_want" ]]
+          [[ $(subjects "$page") == "$page_want" ]]
+
+          # The JSON path is exactly the literal '.', and nothing else is in the file.
+          jq -e '. == {"path": "."}' "$dir/$meta" > /dev/null
+
+          signer_digest=$(jq -r '.[0].verificationResult.signature.certificate.buildSignerDigest' "$out/$smod.json")
+          page_signer_digest=$(jq -r '.[0].verificationResult.signature.certificate.buildSignerDigest' "$out/$page.json")
+          [[ "$signer_digest" =~ ^[0-9a-f]{40}$ && "$signer_digest" == "$page_signer_digest" ]]
+          [[ "$signer_digest" == "$EXPECTED_BUILD_SIGNER_DIGEST" ]] || {
+            printf 'buildSignerDigest %s differs from expected %s\n' "$signer_digest" "$EXPECTED_BUILD_SIGNER_DIGEST" >&2
+            exit 1
+          }
+
+          {
+            printf '## TEST ONLY: signed release path proof\n\n'
+            printf -- '- Tag `%s`, commit `%s`\n' "$TAG" "$GITHUB_SHA"
+            printf -- '- Signer identity (pinned exactly): `%s`\n' "$SHARED_WORKFLOW_IDENTITY"
+            printf -- '- buildSignerDigest (matches pin): `%s`\n' "$signer_digest"
+            printf -- '- Source ref `%s`, digest `%s`, repository ID `%s`\n' "$GITHUB_REF" "$GITHUB_SHA" "$GITHUB_REPOSITORY_ID"
+            printf -- '- Release assets: `%s`\n' "$(tr '\n' ' ' <<< "$want")"
+            printf -- '- Release JSON: `%s`\n\n' "$(jq -c . "$dir/$meta")"
+            printf '| Verified subject (same statement as %s) | SHA-256 |\n|---|---|\n' "$smod"
+            jq -r '.[0].verificationResult.statement.subject[] | "| `\(.name)` | `\(.digest.sha256)` |"' "$out/$smod.json"
+            printf '\n| Verified subject (page statement) | SHA-256 |\n|---|---|\n'
+            jq -r '.[0].verificationResult.statement.subject[] | "| `\(.name)` | `\(.digest.sha256)` |"' "$out/$page.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+          printf 'buildSignerDigest=%s\n' "$signer_digest"
